@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Roster PDF Converter</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 720px; margin: 0 auto; padding: 40px 20px; color: #1e293b; }
+  h1 { font-size: 1.3rem; margin-bottom: 0.25rem; }
+  .sub { color: #64748b; font-size: 0.9rem; margin-bottom: 2rem; }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; }
+  .row input[type="text"] { flex: 1; padding: 6px 8px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.9rem; }
+  .idtag { font-size: 0.7rem; color: #94a3b8; font-family: monospace; border: 1px solid #e2e8f0; border-radius: 4px; padding: 2px 6px; background: #f8fafc; white-space: nowrap; }
+  button { cursor: pointer; border: none; border-radius: 8px; padding: 10px 18px; font-size: 0.9rem; font-weight: 500; }
+  .primary { background: #4f46e5; color: white; }
+  .primary:disabled { opacity: 0.4; cursor: not-allowed; }
+  .secondary { background: white; border: 1px solid #e2e8f0; color: #475569; }
+  #fileInput { margin-bottom: 20px; }
+  #status { color: #64748b; font-size: 0.9rem; margin: 10px 0; }
+  #error { color: #b91c1c; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 10px 14px; font-size: 0.85rem; margin: 10px 0; display: none; }
+  #reviewSection { display: none; margin-top: 20px; }
+</style>
+</head>
+<body>
+  <h1>Roster PDF Converter</h1>
+  <p class="sub">
+    Teacher-only tool. Upload the original roster PDF here, review the parsed names,
+    then download a small file to upload into the main app's "Upload roster PDF" button --
+    it accepts this converted file the same way it accepts a real PDF.
+  </p>
+
+  <input type="file" id="fileInput" accept="application/pdf" />
+  <div id="status"></div>
+  <div id="error"></div>
+
+  <div id="reviewSection">
+    <div id="rows"></div>
+    <div style="margin-top:16px; display:flex; gap:8px;">
+      <button class="primary" id="downloadBtn">Download converted file</button>
+      <button class="secondary" id="cancelBtn">Start over</button>
+    </div>
+  </div>
+
+<script>
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.js";
+
+  const fileInput = document.getElementById("fileInput");
+  const statusEl = document.getElementById("status");
+  const errorEl = document.getElementById("error");
+  const reviewSection = document.getElementById("reviewSection");
+  const rowsEl = document.getElementById("rows");
+  const downloadBtn = document.getElementById("downloadBtn");
+  const cancelBtn = document.getElementById("cancelBtn");
+
+  let currentRows = [];
+
+  // --- Same extraction/parsing approach as the main app's rosterParser.js ---
+  async function extractPdfText(file) {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    let fullText = "";
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      const lines = {};
+      for (const item of content.items) {
+        const y = Math.round(item.transform[5]);
+        if (!lines[y]) lines[y] = [];
+        lines[y].push(item);
+      }
+      const sortedY = Object.keys(lines).map(Number).sort((a, b) => b - a);
+      for (const y of sortedY) {
+        const lineItems = lines[y].sort((a, b) => a.transform[4] - b.transform[4]);
+        fullText += lineItems.map((it) => it.str).join(" ") + "\n";
+      }
+    }
+    return fullText;
+  }
+
+  function parseRosterText(text) {
+    const lines = text.split("\n");
+    const rows = [];
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const commaMatch = line.match(/^([A-Za-z'\-]+(?:\s[A-Za-z'\-]+)*),\s+([A-Za-z'\-]+(?:\s[A-Za-z'\-]+)*)\b/);
+      if (commaMatch) {
+        const lastName = commaMatch[1].trim();
+        const firstName = commaMatch[2].trim();
+        const idMatch = line.match(/\b(\d{4,8})\b/);
+        rows.push({ firstName, lastName, id: idMatch ? idMatch[1] : null });
+      }
+    }
+    return rows;
+  }
+
+  function abbreviateName(row) {
+    const firstWord = row.firstName.split(/\s+/)[0];
+    const lastInitial = row.lastName.trim()[0]?.toUpperCase() || "";
+    return `${firstWord} ${lastInitial}.`;
+  }
+
+  function renderRows() {
+    rowsEl.innerHTML = "";
+    currentRows.forEach((row, i) => {
+      const div = document.createElement("div");
+      div.className = "row";
+      div.innerHTML = `
+        <input type="checkbox" ${row.include ? "checked" : ""} data-idx="${i}" class="includeBox" />
+        <input type="text" value="${row.editedName.replace(/"/g, "&quot;")}" data-idx="${i}" class="nameBox" />
+        ${row.idTag ? `<span class="idtag">ID ${row.idTag}</span>` : ""}
+      `;
+      rowsEl.appendChild(div);
+    });
+    rowsEl.querySelectorAll(".includeBox").forEach((box) => {
+      box.addEventListener("change", (e) => {
+        currentRows[+e.target.dataset.idx].include = e.target.checked;
+      });
+    });
+    rowsEl.querySelectorAll(".nameBox").forEach((box) => {
+      box.addEventListener("input", (e) => {
+        currentRows[+e.target.dataset.idx].editedName = e.target.value;
+      });
+    });
+  }
+
+  fileInput.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    errorEl.style.display = "none";
+    reviewSection.style.display = "none";
+    statusEl.textContent = "Reading PDF...";
+    try {
+      const text = await extractPdfText(file);
+      const rows = parseRosterText(text);
+      if (rows.length === 0) {
+        statusEl.textContent = "";
+        errorEl.textContent = "Couldn't find any names in that PDF.";
+        errorEl.style.display = "block";
+        return;
+      }
+      currentRows = rows.map((row) => ({
+        editedName: abbreviateName(row),
+        idTag: row.id ? row.id.slice(-2) : null,
+        include: true,
+      }));
+      statusEl.textContent = `Found ${currentRows.length} student${currentRows.length === 1 ? "" : "s"}. Review below, then download.`;
+      renderRows();
+      reviewSection.style.display = "block";
+    } catch (err) {
+      statusEl.textContent = "";
+      errorEl.textContent = "Couldn't read that PDF: " + (err?.message || err);
+      errorEl.style.display = "block";
+    }
+  });
+
+  downloadBtn.addEventListener("click", () => {
+    const finalRows = currentRows
+      .filter((r) => r.include && r.editedName.trim())
+      .map((r) => ({ editedName: r.editedName.trim(), idTag: r.idTag, include: true }));
+    const blob = new Blob([JSON.stringify(finalRows, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `roster-converted-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  cancelBtn.addEventListener("click", () => {
+    currentRows = [];
+    fileInput.value = "";
+    statusEl.textContent = "";
+    reviewSection.style.display = "none";
+  });
+</script>
+</body>
+</html>
